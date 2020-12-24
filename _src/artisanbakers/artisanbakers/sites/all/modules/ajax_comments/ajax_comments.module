@@ -1,0 +1,149 @@
+<?php
+
+/**
+ * Implementation of hook_menu().
+ */
+function ajax_comments_menu() {
+  $items['ajax_comments/reply/%/%'] = array(
+    'page callback' => 'ajax_comments_reply',
+    'access callback' => 'user_access',
+    'access arguments' => array('access content'),
+    'page arguments' => array(2, 3),
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/config/content/ajax_comments'] = array(
+    'title' => 'AJAX comments',
+    'description' => 'AJAXifies comments on site.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('ajax_comments_settings'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'ajax_comments.admin.inc',
+   );
+  return $items;
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function ajax_comments_form_comment_form_alter(&$form, &$form_state, $form_id) {
+  // Check to see if this node type uses ajax comments.
+  $active = ajax_comments_node_type_active($form['#node']->type);
+  if ($active) {
+    $form['actions']['submit']['#ajax'] = array(
+      'callback' => 'ajax_comments_submit_js',
+      'wrapper' => 'comment-form',
+      'method' => 'replace',
+      'effect' => 'fade',
+    );
+  }
+}
+/**
+ * Builds the comment.
+ */
+function ajax_comments_submit_js($form, &$form_state) {
+  // This is to remove the "Your comment has been posted" status message that 
+  //   will appear upon refresh. This seems dirty but it means we don't have to
+  //   rewrite the whole comment_form_submit(). Please chime in if you think this is dumb.
+  ajax_comments_remove_status($_SESSION);
+  $comment = $form_state['comment'];
+  $node = $form['#node'];
+
+  $comment_build = comment_view($comment, $node);
+  // Remove "reply" which doesn't work unless page is refreshed. TODO: fix.
+  unset($comment_build['links']['comment']['#links']['comment-reply']);
+  $comment_text = drupal_render($comment_build);
+  $notify_text = theme('ajax_comments_notify_text');
+
+  // Check if this comment is a reply.
+  // TODO: if there is more than one comment under this parent it should go below that comment not the parent.
+  $pid = $form_state['values']['pid'];
+  if ($pid) {
+    $comment_text = '<div class="indented">' . $comment_text . '</div>';
+    $commands[] = ajax_command_after('div[about="/comment/' . $pid . '#comment-' . $pid . '"]', $notify_text . $comment_text);
+  }
+  else {
+    $commands[] = ajax_command_before('h2.comment-form', $notify_text . $comment_text);
+  }
+
+  // Remove comment forms on the page.
+  $commands[] = ajax_command_invoke('form.comment-form', 'remove');
+
+  return array('#type' => 'ajax', '#commands' => $commands);
+}
+
+/**
+ * Implementation of hook_comment_view().
+ */
+function ajax_comments_comment_view($comment, $view_mode, $langcode) {
+  $active = ajax_comments_node_type_active(ltrim($comment->node_type, 'comment_node_'));
+  if ($active) {
+    $comment->content['links']['comment']['#links']['comment-reply']['attributes']['class'] = array('use-ajax');
+    $comment->content['links']['comment']['#links']['comment-reply']['href'] = 'ajax_comments/reply/' . $comment->nid . '/' . $comment->cid;
+  }
+}
+
+/**
+ *  Callback for clicking "reply".
+ */
+function ajax_comments_reply($nid, $cid) {
+  global $base_path;
+
+  $node = node_load($nid);
+  $edit = array('nid' => $node->nid);
+  // If there is a cid this is a reply to a comment.
+  if ($cid) {
+    $edit = $edit + array('pid' => $cid);
+  }
+  if (user_access('post comments') && $node->comment == COMMENT_NODE_OPEN && (variable_get('comment_form_location_' . $node->type, COMMENT_FORM_BELOW) == COMMENT_FORM_BELOW)) {
+    $form_build = drupal_get_form("comment_node_{$node->type}_form", (object) $edit);
+    $form = drupal_render($form_build);
+  }
+  // Remove all other comment forms on the page.
+  $commands[] = ajax_command_invoke('form.comment-form', 'remove');
+  $commands[] = ajax_command_after('div[about="' . $base_path . 'comment/' . $cid . '#comment-' . $cid . '"]', $form);
+  $page = array('#type' => 'ajax', '#commands' => $commands);
+  ajax_deliver($page);
+}  
+
+/**
+ *  Return text to notify user their comment has been added.
+ */
+function theme_ajax_comments_notify_text() {
+  $text = t('Your comment has been posted');
+  // Using messages html (minus .session which defaults to 960px width in bartik) for now.  
+  return '<div id="messages"><div class="clearfix"><div class="messages status"><h2 class="element-invisible">Status message</h2>' . $text . '</div></div></div>';
+}
+
+/**
+ * Remove "Your comment has been posted." or "Your comment has been queued.."
+ *   from the status message.
+ */
+function ajax_comments_remove_status(&$_SESSION) {
+  $published = t('Your comment has been posted.');
+  $not_published = t('Your comment has been queued for review by site administrators and will be published after approval.');
+  foreach ($_SESSION['messages']['status'] as $key => $value) {
+    if ($value == $published || $value == $not_published) {
+      unset($_SESSION['messages']['status'][$key]);
+    }
+  }
+} 
+
+/**
+ * Implementaiton of hook_theme().
+ */
+function ajax_comments_theme($existing, $type, $theme, $path) {
+  return array(
+    'ajax_comments_notify_text' => array(
+    ), 
+  );
+}
+
+/**
+ * Return true if this node uses ajax comments.
+ */
+function ajax_comments_node_type_active($node_type) {
+  $types = variable_get('ajax_comments_node_types');
+  if ($types[$node_type]) {
+    return TRUE;
+  }
+}
